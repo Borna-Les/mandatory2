@@ -32,6 +32,7 @@ BC = tuple[float | sp.Expr, float | sp.Expr]
 BasisCallable = Callable[[np.ndarray], np.ndarray]
 Matrix = np.ndarray | sparse.spmatrix
 
+##### DOMAIN MAPING HELPERS
 
 @overload
 def map_reference_domain(x: np.ndarray, d: Domain, r: Domain) -> np.ndarray: ...
@@ -39,7 +40,7 @@ def map_reference_domain(x: np.ndarray, d: Domain, r: Domain) -> np.ndarray: ...
 def map_reference_domain(x: sp.Expr, d: Domain, r: Domain) -> sp.Expr: ...
 def map_reference_domain(x, d, r):
     """Map point(s) x from the true domain d to the reference domain r."""
-    return r[0] + (r[1] - r[0]) * (x - d[0]) / (d[1] - d[0])
+    return r[0] + (r[1] - r[0]) * (x - d[0]) / (d[1] - d[0]) # phys to scaled, ref domain mapping
 
 
 @overload
@@ -48,16 +49,16 @@ def map_true_domain(x: np.ndarray, d: Domain, r: Domain) -> np.ndarray: ...
 def map_true_domain(x: sp.Expr, d: Domain, r: Domain) -> sp.Expr: ...
 def map_true_domain(x, d, r):
     """Map point(s) x from the reference domain r to the true domain d."""
-    return d[0] + (d[1] - d[0]) * (x - r[0]) / (r[1] - r[0])
+    return d[0] + (d[1] - d[0]) * (x - r[0]) / (r[1] - r[0]) # scaled, ref domain to phys mapping
 
 
 def map_expression_true_domain(u: sp.Basic, x: sp.Symbol, d: Domain, r: Domain) -> sp.Basic:
     """Rewrite the sympy expression u(x), given on domain d, in terms of the reference domain r."""
     if d != r:
-        u = sp.sympify(u)
+        u = sp.sympify(u) # Sympy u(x) defined on domain d
         xm = map_true_domain(x, d, r)
         u = u.replace(x, xm)
-    return u
+    return u # injects the mapping from the reference domain to the true domain
 
 
 class FunctionSpace(ABC):
@@ -71,8 +72,8 @@ class FunctionSpace(ABC):
     """
 
     def __init__(self, N: int, domain: Domain = (-1, 1)) -> None:
-        self.N = N
-        self._domain = domain
+        self.N = N # truncation order
+        self._domain = domain # physical domain of the function space
 
     @property
     def domain(self) -> Domain:
@@ -82,21 +83,23 @@ class FunctionSpace(ABC):
     def domain_factor(self) -> float:
         d = self.domain
         r = self.reference_domain
-        return (d[1] - d[0]) / (r[1] - r[0])
+        return (d[1] - d[0]) / (r[1] - r[0]) #jacobian scaling factor (h) used when changing variables in integral and deriv evaluation
 
     def mesh(self, N: int | None = None) -> np.ndarray:
         d = self.domain
         n = N if N is not None else self.N
-        return np.linspace(d[0], d[1], n + 1)
+        return np.linspace(d[0], d[1], n + 1) # generate a uniform mesh in the physical domain
 
     def weight(self, x: sp.Symbol = x) -> sp.Expr | int:
-        return 1
+        return 1 # weight func for the inner product; overriden by Chebyshev weight?
 
+    #### ABSTRACT METHODS
+    # Abstract methods (do not edit); subclasses must implement these for specific function spaces
     @abstractmethod
     def L2_norm_sq(self, N: int) -> np.ndarray: ...
 
     @property
-    @abstractmethod
+    @abstractmethod 
     def reference_domain(self) -> Domain: ...
 
     @overload
@@ -109,44 +112,46 @@ class FunctionSpace(ABC):
     @abstractmethod
     def derivative_basis_function(self, j: int, k: int = 1) -> BasisCallable: ...
 
+
+    #### CONCRETE METHODS
     def evaluate_basis_function(self, Xj: np.ndarray, j: int) -> np.ndarray:
-        return self.basis_function(j)(Xj)
+        return self.basis_function(j)(Xj) # eval basis func at x
 
     def evaluate_derivative_basis_function(
         self, Xj: np.ndarray, j: int, k: int = 1
     ) -> np.ndarray:
-        return self.derivative_basis_function(j, k=k)(Xj)
+        return self.derivative_basis_function(j, k=k)(Xj) # eval derivative of basis func at x
 
     def eval(self, uh: np.ndarray, xj: np.ndarray | float) -> np.ndarray:
         xj = np.atleast_1d(xj)
         Xj = map_reference_domain(xj, self.domain, self.reference_domain)
         P = self.eval_basis_function_all(Xj)
-        return P @ uh
+        return P @ uh #evaluate u_n expansion via Mvp (on ref domain)
 
     def eval_basis_function_all(self, Xj: np.ndarray) -> np.ndarray:
         P = np.zeros((len(Xj), self.N + 1))
         for j in range(self.N + 1):
             P[:, j] = self.evaluate_basis_function(Xj, j)
-        return P
+        return P # matrix of all basis functions evaluated at Xj
 
-    def inner_product(self, u: sp.Expr) -> np.ndarray:
+    def inner_product(self, u: sp.Expr) -> np.ndarray: # compute inner products <u, psi_i> for all basis functions psi_i
         us = map_expression_true_domain(u, x, self.domain, self.reference_domain)
-        us = sp.lambdify(x, us)
-        uj = np.zeros(self.N + 1)
-        h = self.domain_factor
-        r = self.reference_domain
+        us = sp.lambdify(x, us) # convert sympy expression to numerical function
+        uj = np.zeros(self.N + 1) # initialize array for inner product results
+        h = self.domain_factor # jacobian factor for domain mapping
+        r = self.reference_domain # reference domain for the function space
         for i in range(self.N + 1):
-            psi = self.basis_function(i)
+            psi = self.basis_function(i) # get the i-th basis function
 
             def uv(Xj, psi=psi):
-                return us(Xj) * psi(Xj)
+                return us(Xj) * psi(Xj) # integrand for the inner product at Xj
 
-            uj[i] = float(h) * quad(uv, float(r[0]), float(r[1]))[0]
-        return uj
+            uj[i] = float(h) * quad(uv, float(r[0]), float(r[1]))[0] # compute the inner product using numerical quadrature (scipy.integrate.quad)
+        return uj # array of inner products with all basis functions, shape (N+1,) ?
 
     def mass_matrix(self) -> Matrix:
         """Generic (slow) mass matrix via numerical quadrature; subclasses may override with a closed-form version."""
-        return assemble_generic_matrix(TrialFunction(self), TestFunction(self))
+        return assemble_generic_matrix(TrialFunction(self), TestFunction(self)) # assemble the generic mass matrix using trial and test functions, <psi_j, psi_i>
 
 
 class Polynomial(FunctionSpace):
@@ -154,7 +159,7 @@ class Polynomial(FunctionSpace):
 
     @property
     def reference_domain(self) -> Domain:
-        raise NotImplementedError
+        return (-1, 1) # reference domain for polynomial spaces
 
     @overload
     def basis_function(self, j: int, sympy: Literal[True]) -> sp.Expr: ...
@@ -164,10 +169,14 @@ class Polynomial(FunctionSpace):
     def basis_function(self, j, sympy=False): ...
 
     def derivative_basis_function(self, j: int, k: int = 1) -> ABCPolyBase:
-        raise NotImplementedError
+        return self.basis_function(j).deriv(k) # return the k-th derivative of the j-th basis functiont
 
     def mass_matrix(self) -> sparse.spmatrix:
-        raise NotImplementedError
+        """ Builds sparse diagonal matrix of size (n+1) * (n+1) for the mass matrix of the given basis functions."""
+        n = self.N
+        m = self.L2_norm_sq(n+1) # get the L2 norms squared of the basis functions
+        M = sparse.diags(m, format='csr', offsets=0, shape=(n+1, n+1)) # build the sparse diagonal mass matrix
+        return M # return the sparse diagonal mass matrix
 
 
 class Legendre(Polynomial):
@@ -182,22 +191,22 @@ class Legendre(Polynomial):
     def basis_function(self, j: int, sympy: Literal[False] = False) -> Leg: ...
     def basis_function(self, j, sympy=False):
         if sympy:
-            return sp.legendre(j, x)
-        return Leg.basis(j)
+            return sp.legendre(j, x) # legendre from sympy
+        return Leg.basis(j) 
 
-    def L2_norm_sq(self, N: int) -> np.ndarray:
-        raise NotImplementedError
+    def L2_norm_sq(self, N: int) -> np.ndarray: 
+        return 2.0/(2.0*np.arange(N)+1.0) # squared L2 norms of the Legendre basis functions
 
     def eval(self, uh: np.ndarray, xj: np.ndarray | float) -> np.ndarray:
         xj = np.atleast_1d(xj)
         Xj = map_reference_domain(xj, self.domain, self.reference_domain)
-        return np.polynomial.legendre.legval(Xj, uh)
+        return np.polynomial.legendre.legval(Xj, uh) # evaluate the Legendre series at the mapped points
 
 
 class Chebyshev(Polynomial):
     """Orthogonal Chebyshev polynomial space, T_0..T_N, on reference domain (-1, 1)."""
 
-    def __init__(self, N: int, domain: Domain = (-1, 1)) -> None:
+    def __init__(self, N: int, domain: Domain = (-1, 1)) -> None: # Note domain
         FunctionSpace.__init__(self, N, domain=domain)
 
     @overload
@@ -210,13 +219,17 @@ class Chebyshev(Polynomial):
         return Cheb.basis(j)
 
     def weight(self, x: sp.Symbol = x) -> sp.Expr:
-        return 1 / sp.sqrt(1 - x**2)
+        return 1 / sp.sqrt(1 - x**2) # weight function for Chebyshev polynomials enforcing the orthogonal L2 inner product
 
-    def L2_norm_sq(self, N: int) -> np.ndarray:
-        raise NotImplementedError
+    def L2_norm_sq(self, N: int) -> np.ndarray: # squared L2 weighted norms of the Chebyshev basis functions
+        c = np.full_like(np.arange(N), np.pi / 2, dtype=float)
+        c[0] = np.pi # first element adjusted
+        return c # closed form; c0 and cj<=1 differ
 
     def eval(self, uh: np.ndarray, xj: np.ndarray | float) -> np.ndarray:
-        raise NotImplementedError
+        xj = np.atleast_1d(xj)
+        Xj = map_reference_domain(xj, self.domain, self.reference_domain)
+        return np.polynomial.chebyshev.chebval(Xj, uh) # evaluate the Chebyshev series at the mapped points
 
     def inner_product(self, u: sp.Expr) -> np.ndarray:
         """Inner products (u, T_i), via the substitution x = cos(theta), integrating over
@@ -284,9 +297,9 @@ class Sines(Trigonometric):
     def derivative_basis_function(self, j: int, k: int = 1) -> BasisCallable:
         scale = ((j + 1) * np.pi) ** k * {0: 1, 1: -1}[(k // 2) % 2]
         if k % 2 == 0:
-            return lambda Xj: scale * np.sin((j + 1) * np.pi * Xj)
+            return lambda Xj: scale * np.sin((j + 1) * np.pi * Xj) #even derivative of sine
         else:
-            return lambda Xj: scale * np.cos((j + 1) * np.pi * Xj)
+            return lambda Xj: scale * np.cos((j + 1) * np.pi * Xj) #odd derivativ of sine
 
     def L2_norm_sq(self, N: int) -> np.ndarray:
         return np.full(N, 0.5)
@@ -296,24 +309,32 @@ class Cosines(Trigonometric):
     def __init__(
         self, N: int, domain: Domain = (0, 1), bc: BC = (0, 0), constraint: int = 0
     ) -> None:
-        raise NotImplementedError
+        Trigonometric.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
 
     @overload
     def basis_function(self, j: int, sympy: Literal[True]) -> sp.Expr: ...
     @overload
     def basis_function(self, j: int, sympy: Literal[False] = False) -> BasisCallable: ...
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        if sympy:
+            return sp.cos(j * sp.pi * x)
+        return lambda Xj: np.cos(j * np.pi * Xj) # cosine basis function cos(j*pi*x)
 
     def derivative_basis_function(self, j: int, k: int = 1) -> BasisCallable:
-        raise NotImplementedError
+        scale = (j * np.pi) ** k * {0: 1, 1: -1}[((k + 1) // 2) % 2] # k being derivative order and j being jth cosine basis function
+        if k % 2 == 0:
+            return lambda Xj: scale * np.cos(j * np.pi * Xj) # even derivative of cosine
+        else:
+            return lambda Xj: scale * np.sin(j * np.pi * Xj) # odd derivative of cosine
 
     def L2_norm_sq(self, N: int) -> np.ndarray:
-        raise NotImplementedError
+        c = np.full_like(np.arange(N), 0.5, dtype=float) #for j>=1
+        c[0] = 1.0 # first coefficient differs for cosine basis (integral(cos**2(0)dx = 1)
+        return c
 
-
+##### BOUNDARIES
 # Create classes to hold the boundary function
-
 
 class Dirichlet:
     """Affine lift `B.x` on `domain` with `B.x(d0) = bc[0]`, `B.x(d1) = bc[1]`;
@@ -410,21 +431,40 @@ class DirichletLegendre(Composite, Legendre):
     @overload
     def basis_function(self, j: int, sympy: Literal[False] = False) -> Leg: ...
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
-
+        # individual legendre cannot be used directly as trial funcs for homogeneous BC?!
+        # combination Pi-Pi+2 to satisfy homogeneous Dirichlet BC at [-1,1] edges
+        x = sp.Symbol("x")
+        if sympy:
+            return sp.legendre(j, x) - sp.legendre(j + 2, x)
+        else:
+            return Leg.basis(j) - Leg.basis(j + 2) #
+        
 
 class NeumannLegendre(Composite, Legendre):
     def __init__(
         self, N: int, domain: Domain = (-1, 1), bc: BC = (0, 0), constraint: int = 0
     ) -> None:
-        raise NotImplementedError
+        Legendre.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
+        j = np.arange(N + 1)
+        # Need to find composite basis satisfying psi'(+-1)=0 for Neumann BC
+        # here Neumann can be treated naturally or essentially (comes down to evaluating dense or sparse matrices)
+        # assumign we want to achieve spectral efficiency, we need to engineer the basis functions such that their derivatives vanish at the boundaries
+        # Spectral galerkin requires psi'(+-1)=0 for Neumann BC
+        a_j = -j * (j + 1) / ((j + 2) * (j + 3))
+        self.S = sparse.diags((np.ones(N + 1), a_j), (0, 2), shape=(N + 1, N + 3), format="csr")
 
     @overload
     def basis_function(self, j: int, sympy: Literal[True]) -> sp.Expr: ...
     @overload
     def basis_function(self, j: int, sympy: Literal[False] = False) -> Leg: ...
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        p_jp2_multip = j*(j + 1)/((j + 2)*(j + 3))
+        x = sp.Symbol("x")
+        if sympy:
+            return sp.legendre(j, x) - p_jp2_multip*sp.legendre(j + 2, x)
+        else:
+            return Leg.basis(j) - p_jp2_multip*Leg.basis(j + 2) # what kind of composite basis has derivatives that enforce homogneous neumann
 
 
 class DirichletChebyshev(Composite, Chebyshev):
@@ -440,21 +480,31 @@ class DirichletChebyshev(Composite, Chebyshev):
     def basis_function(self, j, sympy=False):
         if sympy:
             return sp.cos(j * sp.acos(x)) - sp.cos((j + 2) * sp.acos(x))
-        return Cheb.basis(j) - Cheb.basis(j + 2)
-
+        return Cheb.basis(j) - Cheb.basis(j + 2)  
 
 class NeumannChebyshev(Composite, Chebyshev):
     def __init__(
         self, N: int, domain: Domain = (-1, 1), bc: BC = (0, 0), constraint: int = 0
     ) -> None:
-        raise NotImplementedError
+        Chebyshev.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
+        j = np.arange(N+1)
+        # Construct the sparse matrix S for the composite Neumann-Chebyshev basis functions; encodes the relationship between the standard Chebyshev basis and the composite Neumann-Chebyshev basis
+        # Composite func space is N+1 basis functions large, each composite is up to N+2 modes; need orthogonal cheb polys up to N+2; hence N+3 polynomials
+        # S E R^(N+1)×(N+3) since psi = SQ, where psi are the composite Neumann-Chebyshev basis functions and Q are the standard Chebyshev polynomials
+        self.S = sparse.diags((np.ones(N+1), -((j/(j + 2))** 2)),(0, 2), shape=(N+1, N +3), format="csr" ) #
 
     @overload
     def basis_function(self, j: int | sp.Symbol, sympy: Literal[True]) -> sp.Expr: ...
     @overload
     def basis_function(self, j: int, sympy: Literal[False] = False) -> Cheb: ...
+    
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        t_jp2_multip = (j / (j + 2)) ** 2
+        if sympy:
+            return sp.cos(j*sp.acos(x)) - t_jp2_multip*sp.cos((j + 2)*sp.acos(x))
+        else:
+            return Cheb.basis(j) - t_jp2_multip*Cheb.basis(j + 2) # Tj_prime(+-1) = (+-1)^(j+1)*j^2 --> backengineercomposite basis satisfying homog. Neumann BC
 
 
 class BasisFunction:
@@ -535,7 +585,7 @@ def project(ue: sp.Expr, V: FunctionSpace) -> np.ndarray:
     v = TestFunction(V)
     b = inner(ue, v)
     A = inner(u, v)
-    uh = sparse.linalg.spsolve(A, b)
+    uh = sparse.linalg.spsolve(A, b) # solve the linear system for the expansion coefficients using spsolve
     return uh
 
 
@@ -545,11 +595,11 @@ def L2_error(uh: np.ndarray, ue: sp.Expr, V: FunctionSpace, kind: str = "norm") 
     uej = sp.lambdify(x, ue)
 
     def uv(xj):
-        return ((uej(xj) - V.eval(uh, xj)) ** 2).item()
+        return ((uej(xj) - V.eval(uh, xj)) ** 2).item() # squared L2 pointwise error at xj
 
     return np.sqrt(quad(uv, float(d[0]), float(d[1]))[0])
 
-
+###### TESTS
 def test_project() -> None:
     ue = sp.besselj(0, x)
     domain = (0, 10)
@@ -609,7 +659,6 @@ def test_convection_diffusion() -> None:
             f"test_convection_diffusion: L2 error = {err:2.4e}, N = {N}, {V.__class__.__name__}"
         )
         assert err < 1e-3
-
 
 if __name__ == "__main__":
     test_project()
